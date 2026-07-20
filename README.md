@@ -1,4 +1,4 @@
-# FaceRoll Phase V2
+# face-edu
 
 Clean deployable project for the **Phase V2 architecture**:
 

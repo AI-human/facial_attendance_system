@@ -5,7 +5,7 @@ export default function HomePage() {
   return (
     <main className="shell">
       <nav className="nav">
-        <div className="brand">FaceRoll V2</div>
+        <div className="brand">face-edu</div>
         <div className="navlinks">
           <Link href="/enroll">Enroll</Link>
           <Link href="/check-in/demo-session">Check in</Link>

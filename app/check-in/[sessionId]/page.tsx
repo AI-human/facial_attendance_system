@@ -43,7 +43,7 @@ export default function CheckInPage({ params }: { params: Promise<{ sessionId: s
 
   return (
     <main className="shell">
-      <nav className="nav"><Link className="brand" href="/">FaceRoll V2</Link><div className="navlinks"><Link href="/enroll">Enroll</Link></div></nav>
+      <nav className="nav"><Link className="brand" href="/">face-edu</Link><div className="navlinks"><Link href="/enroll">Enroll</Link></div></nav>
       <div className="panel" style={{ maxWidth: 960, margin: "0 auto 18px" }}>
         <h1 style={{ fontSize: 48 }}>Check in</h1>
         <p>Session: <strong>{sessionId}</strong></p>

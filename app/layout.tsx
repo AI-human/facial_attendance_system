@@ -2,7 +2,7 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "FaceRoll Phase V2",
+  title: "face-edu",
   description: "On-device facial attendance with liveness checks and Vercel database sync.",
 };
 
