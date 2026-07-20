@@ -4,7 +4,6 @@ import { useEffect, useRef, useState } from "react";
 import {
   analyzePassiveSpoofSignals,
   runFaceAntispoofONNX,
-  runChallengeState,
   type ChallengeState,
   type SpoofResult,
 } from "@/lib/antispoof";
@@ -18,25 +17,66 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const engineRef = useRef<FaceEngine | null>(null);
-  const challengeRef = useRef<ChallengeState>({ blinkSeen: false, headTurnSeen: false, instruction: "Hold face steady for 5s" });
+  const mediaStreamRef = useRef<MediaStream | null>(null);
 
   const [ready, setReady] = useState(false);
   const [message, setMessage] = useState("Starting camera…");
   const [spoof, setSpoof] = useState<SpoofResult | null>(null);
-  const [challenge, setChallenge] = useState<ChallengeState>(challengeRef.current);
   const [livenessProgress, setLivenessProgress] = useState(0); // 0 to 5 seconds
   const [phase, setPhase] = useState<"antispoof" | "similarity" | "complete">("antispoof");
 
   const isInferringSpoof = useRef(false);
   const livenessStartRef = useRef<number | null>(null);
   const isTransitioningRef = useRef(false);
+  const isComponentMounted = useRef(true);
+
+  function stopCamera() {
+    if (mediaStreamRef.current) {
+      mediaStreamRef.current.getTracks().forEach((track) => track.stop());
+      mediaStreamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setReady(false);
+  }
+
+  async function startCamera() {
+    stopCamera();
+    try {
+      setPhase("antispoof");
+      setLivenessProgress(0);
+      livenessStartRef.current = null;
+      isTransitioningRef.current = false;
+      setMessage("Starting camera…");
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: "user", width: 960, height: 720 },
+        audio: false,
+      });
+      mediaStreamRef.current = stream;
+
+      if (!videoRef.current) return;
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+
+      if (!engineRef.current) {
+        engineRef.current = await FaceEngine.create();
+      }
+
+      setReady(true);
+      setMessage("Hold face steady for 5 seconds");
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : "Camera failed to start");
+    }
+  }
 
   // Phase 2: Extract embedding & verify similarity ONLY after 5s liveness passes
   async function processSimilarity(verifiedSpoof: SpoofResult) {
     if (!canvasRef.current || isTransitioningRef.current) return;
     isTransitioningRef.current = true;
     setPhase("similarity");
-    setMessage("5s Liveness Passed ✓ — Turning off anti-spoof & checking similarity...");
+    setMessage("5s Liveness Passed ✓ — Stopping camera & verifying identity...");
 
     try {
       if (!engineRef.current) {
@@ -47,18 +87,12 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
       const result = await engineRef.current.extractEmbedding(canvasRef.current);
       const activeChallenge = { blinkSeen: true, headTurnSeen: true, instruction: "5s Liveness Verified", passed: true };
 
+      // Turn off camera stream immediately after capture & verification
+      stopCamera();
+
       onCapture({ ...result, spoof: verifiedSpoof, challenge: activeChallenge });
       setPhase("complete");
-      setMessage("Verification complete!");
-
-      // Reset state after 4 seconds for next check
-      setTimeout(() => {
-        livenessStartRef.current = null;
-        isTransitioningRef.current = false;
-        setLivenessProgress(0);
-        setPhase("antispoof");
-        setMessage("Hold face steady for 5s");
-      }, 4000);
+      setMessage("Verification complete! Camera turned off.");
     } catch (err) {
       console.error("Similarity extraction error:", err);
       setMessage(err instanceof Error ? err.message : "Similarity check failed");
@@ -68,73 +102,77 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
   }
 
   useEffect(() => {
+    isComponentMounted.current = true;
+    startCamera();
+
     let running = true;
-    async function boot() {
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user", width: 960, height: 720 }, audio: false });
-      if (!videoRef.current) return;
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
-      engineRef.current = await FaceEngine.create();
-      setReady(true);
-      setMessage("Hold face steady for 5 seconds");
-      tick();
-    }
-
     async function tick() {
-      if (!running || !videoRef.current || !canvasRef.current) return;
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      canvas.width = video.videoWidth || 960;
-      canvas.height = video.videoHeight || 720;
-      const ctx = canvas.getContext("2d", { willReadFrequently: true });
-      if (!ctx) return;
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      if (!running || !isComponentMounted.current) return;
 
-      // Phase 1: Run Anti-Spoofing ONLY during 'antispoof' phase
-      if (!isInferringSpoof.current && !isTransitioningRef.current) {
-        isInferringSpoof.current = true;
-        runFaceAntispoofONNX(canvas)
-          .then((onnxRes) => {
-            if (isTransitioningRef.current) return;
-            const activeResult = onnxRes ?? analyzePassiveSpoofSignals(ctx.getImageData(0, 0, canvas.width, canvas.height));
-            setSpoof(activeResult);
+      if (videoRef.current && canvasRef.current && mediaStreamRef.current && isReady()) {
+        const canvas = canvasRef.current;
+        const video = videoRef.current;
+        canvas.width = video.videoWidth || 960;
+        canvas.height = video.videoHeight || 720;
+        const ctx = canvas.getContext("2d", { willReadFrequently: true });
 
-            if (activeResult.passed) {
-              // Live face! Track continuous 5 seconds
-              const now = Date.now();
-              if (livenessStartRef.current === null) {
-                livenessStartRef.current = now;
-              }
-              const elapsedSec = Math.min(REQUIRED_LIVENESS_DURATION_SEC, (now - livenessStartRef.current) / 1000);
-              setLivenessProgress(elapsedSec);
+        if (ctx) {
+          ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-              if (elapsedSec >= REQUIRED_LIVENESS_DURATION_SEC && !isTransitioningRef.current) {
-                // 5 full seconds reached -> STOP anti-spoofing and transition to Phase 2 (similarity)
-                processSimilarity(activeResult);
-              } else {
-                const remainingSec = Math.ceil(REQUIRED_LIVENESS_DURATION_SEC - elapsedSec);
-                setMessage(`Checking Anti-Spoofing: ${remainingSec}s left`);
-              }
-            } else {
-              // Spoof detected or face lost -> Reset 5s timer
-              livenessStartRef.current = null;
-              setLivenessProgress(0);
-              setMessage(`Anti-spoof failed: ${activeResult.reason}. Hold face steady.`);
-            }
-          })
-          .finally(() => {
-            isInferringSpoof.current = false;
-          });
+          // Phase 1: Run Anti-Spoofing ONLY during active camera and 'antispoof' phase
+          if (!isInferringSpoof.current && !isTransitioningRef.current) {
+            isInferringSpoof.current = true;
+            runFaceAntispoofONNX(canvas)
+              .then((onnxRes) => {
+                if (isTransitioningRef.current || !mediaStreamRef.current) return;
+                const activeResult = onnxRes ?? analyzePassiveSpoofSignals(ctx.getImageData(0, 0, canvas.width, canvas.height));
+                setSpoof(activeResult);
+
+                if (activeResult.passed) {
+                  // Live face! Track continuous 5 seconds
+                  const now = Date.now();
+                  if (livenessStartRef.current === null) {
+                    livenessStartRef.current = now;
+                  }
+                  const elapsedSec = Math.min(REQUIRED_LIVENESS_DURATION_SEC, (now - livenessStartRef.current) / 1000);
+                  setLivenessProgress(elapsedSec);
+
+                  if (elapsedSec >= REQUIRED_LIVENESS_DURATION_SEC && !isTransitioningRef.current) {
+                    // 5 full seconds reached -> STOP anti-spoofing and transition to Phase 2 (similarity)
+                    processSimilarity(activeResult);
+                  } else {
+                    const remainingSec = Math.ceil(REQUIRED_LIVENESS_DURATION_SEC - elapsedSec);
+                    setMessage(`Checking Anti-Spoofing: ${remainingSec}s left`);
+                  }
+                } else {
+                  // Spoof detected or face lost -> Reset 5s timer
+                  livenessStartRef.current = null;
+                  setLivenessProgress(0);
+                  setMessage(`Anti-spoof failed: ${activeResult.reason}. Hold face steady.`);
+                }
+              })
+              .finally(() => {
+                isInferringSpoof.current = false;
+              });
+          }
+        }
       }
 
-      requestAnimationFrame(tick);
+      if (running) {
+        requestAnimationFrame(tick);
+      }
     }
 
-    boot().catch((err) => setMessage(err instanceof Error ? err.message : "Camera failed"));
+    function isReady() {
+      return videoRef.current && videoRef.current.readyState >= 2;
+    }
+
+    tick();
+
     return () => {
       running = false;
-      const tracks = (videoRef.current?.srcObject as MediaStream | null)?.getTracks() ?? [];
-      tracks.forEach((track) => track.stop());
+      isComponentMounted.current = false;
+      stopCamera();
     };
   }, []);
 
@@ -149,7 +187,7 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
       <div className="panel">
         <div className="statusRow">
           <strong>Camera</strong>
-          <span className={ready ? "ok" : "no"}>{ready ? "ready" : "loading"}</span>
+          <span className={ready ? "ok" : "no"}>{ready ? "Active" : "OFF"}</span>
         </div>
 
         <div className="statusRow">
@@ -188,12 +226,11 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
           <span style={{ fontSize: "0.9em" }}>{message}</span>
         </div>
 
-        {spoof?.modelUsed && (
-          <div className="statusRow" style={{ fontSize: "0.8em", opacity: 0.8 }}>
-            <strong>Engine</strong>
-            <span>{spoof.modelUsed}</span>
-          </div>
-        )}
+        <div className="actions" style={{ marginTop: 16 }}>
+          <button className="button primary" onClick={startCamera}>
+            {phase === "complete" || !ready ? "Recheck / Resubmit to capture" : "Restart camera"}
+          </button>
+        </div>
       </div>
     </div>
   );
