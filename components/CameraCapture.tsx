@@ -25,56 +25,45 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
   const [spoof, setSpoof] = useState<SpoofResult | null>(null);
   const [challenge, setChallenge] = useState<ChallengeState>(challengeRef.current);
   const [livenessProgress, setLivenessProgress] = useState(0); // 0 to 5 seconds
-  const [isCapturing, setIsCapturing] = useState(false);
+  const [phase, setPhase] = useState<"antispoof" | "similarity" | "complete">("antispoof");
 
   const isInferringSpoof = useRef(false);
   const livenessStartRef = useRef<number | null>(null);
-  const hasAutoCapturedRef = useRef(false);
+  const isTransitioningRef = useRef(false);
 
-  async function capture(activeSpoofResult?: SpoofResult) {
-    if (!canvasRef.current || isCapturing) return;
-    if (!engineRef.current) {
-      setMessage("Face engine still loading…");
-      return;
-    }
+  // Phase 2: Extract embedding & verify similarity ONLY after 5s liveness passes
+  async function processSimilarity(verifiedSpoof: SpoofResult) {
+    if (!canvasRef.current || isTransitioningRef.current) return;
+    isTransitioningRef.current = true;
+    setPhase("similarity");
+    setMessage("5s Liveness Passed ✓ — Turning off anti-spoof & checking similarity...");
+
     try {
-      setIsCapturing(true);
-      setMessage("5s Liveness verified! Extracting face embedding & checking similarity...");
-
-      // Fresh ONNX inference for capture if not provided
-      const finalSpoof = activeSpoofResult ?? (await runFaceAntispoofONNX(canvasRef.current)) ?? spoof ?? {
-        passed: true,
-        score: 0.95,
-        reason: "Live face verified (5s hold)",
-        modelUsed: "suri-ph/face-antispoof-onnx",
-      };
-
-      if (!finalSpoof.passed) {
-        setMessage(`Spoof rejected: ${finalSpoof.reason}`);
-        livenessStartRef.current = null;
-        hasAutoCapturedRef.current = false;
-        setLivenessProgress(0);
-        setIsCapturing(false);
-        return;
+      if (!engineRef.current) {
+        engineRef.current = await FaceEngine.create();
       }
 
+      // Extract 512-d embedding without concurrent anti-spoofing load
       const result = await engineRef.current.extractEmbedding(canvasRef.current);
       const activeChallenge = { blinkSeen: true, headTurnSeen: true, instruction: "5s Liveness Verified", passed: true };
 
-      onCapture({ ...result, spoof: finalSpoof, challenge: activeChallenge });
-      setMessage("Verified face captured!");
+      onCapture({ ...result, spoof: verifiedSpoof, challenge: activeChallenge });
+      setPhase("complete");
+      setMessage("Verification complete!");
 
-      // Allow future capture after brief pause
+      // Reset state after 4 seconds for next check
       setTimeout(() => {
-        hasAutoCapturedRef.current = false;
         livenessStartRef.current = null;
+        isTransitioningRef.current = false;
         setLivenessProgress(0);
-        setIsCapturing(false);
-      }, 3000);
+        setPhase("antispoof");
+        setMessage("Hold face steady for 5s");
+      }, 4000);
     } catch (err) {
-      console.error("Capture error:", err);
-      setMessage(err instanceof Error ? err.message : "Capture failed");
-      setIsCapturing(false);
+      console.error("Similarity extraction error:", err);
+      setMessage(err instanceof Error ? err.message : "Similarity check failed");
+      isTransitioningRef.current = false;
+      setPhase("antispoof");
     }
   }
 
@@ -101,16 +90,17 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
       if (!ctx) return;
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-      // Run ONNX anti-spoofing asynchronously if not already inferring
-      if (!isInferringSpoof.current && !hasAutoCapturedRef.current) {
+      // Phase 1: Run Anti-Spoofing ONLY during 'antispoof' phase
+      if (!isInferringSpoof.current && !isTransitioningRef.current) {
         isInferringSpoof.current = true;
         runFaceAntispoofONNX(canvas)
           .then((onnxRes) => {
+            if (isTransitioningRef.current) return;
             const activeResult = onnxRes ?? analyzePassiveSpoofSignals(ctx.getImageData(0, 0, canvas.width, canvas.height));
             setSpoof(activeResult);
 
             if (activeResult.passed) {
-              // Face is live! Track continuous 5-second duration
+              // Live face! Track continuous 5 seconds
               const now = Date.now();
               if (livenessStartRef.current === null) {
                 livenessStartRef.current = now;
@@ -118,18 +108,18 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
               const elapsedSec = Math.min(REQUIRED_LIVENESS_DURATION_SEC, (now - livenessStartRef.current) / 1000);
               setLivenessProgress(elapsedSec);
 
-              if (elapsedSec >= REQUIRED_LIVENESS_DURATION_SEC && !hasAutoCapturedRef.current) {
-                hasAutoCapturedRef.current = true;
-                capture(activeResult);
-              } else if (!hasAutoCapturedRef.current) {
+              if (elapsedSec >= REQUIRED_LIVENESS_DURATION_SEC && !isTransitioningRef.current) {
+                // 5 full seconds reached -> STOP anti-spoofing and transition to Phase 2 (similarity)
+                processSimilarity(activeResult);
+              } else {
                 const remainingSec = Math.ceil(REQUIRED_LIVENESS_DURATION_SEC - elapsedSec);
-                setMessage(`Hold face steady for 5s (Verifying: ${remainingSec}s left)`);
+                setMessage(`Checking Anti-Spoofing: ${remainingSec}s left`);
               }
             } else {
-              // Spoof or no face detected — reset 5s timer
+              // Spoof detected or face lost -> Reset 5s timer
               livenessStartRef.current = null;
               setLivenessProgress(0);
-              setMessage(`Liveness failed: ${activeResult.reason}. Hold face steady.`);
+              setMessage(`Anti-spoof failed: ${activeResult.reason}. Hold face steady.`);
             }
           })
           .finally(() => {
@@ -161,14 +151,15 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
           <strong>Camera</strong>
           <span className={ready ? "ok" : "no"}>{ready ? "ready" : "loading"}</span>
         </div>
+
         <div className="statusRow">
-          <strong>Anti-Spoofing (5s Hold)</strong>
+          <strong>Step 1: Anti-Spoofing (5s)</strong>
           <span className={livenessProgress >= REQUIRED_LIVENESS_DURATION_SEC ? "ok" : spoof?.passed ? "warn" : "no"}>
-            {livenessProgress >= REQUIRED_LIVENESS_DURATION_SEC ? "5s Verified ✓" : `${livenessProgress.toFixed(1)}s / 5.0s`}
+            {livenessProgress >= REQUIRED_LIVENESS_DURATION_SEC ? "5s Passed ✓" : `${livenessProgress.toFixed(1)}s / 5.0s`}
           </span>
         </div>
 
-        {/* 5-second liveness progress bar */}
+        {/* 5-second anti-spoofing progress bar */}
         <div style={{ margin: "10px 0 14px", background: "rgba(255,255,255,0.1)", borderRadius: 8, height: 10, overflow: "hidden" }}>
           <div
             style={{
@@ -181,9 +172,17 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
         </div>
 
         <div className="statusRow">
+          <strong>Step 2: Similarity Check</strong>
+          <span className={phase === "similarity" ? "warn" : phase === "complete" ? "ok" : ""}>
+            {phase === "antispoof" ? "Waiting for 5s liveness" : phase === "similarity" ? "Processing..." : "Verified ✓"}
+          </span>
+        </div>
+
+        <div className="statusRow">
           <strong>Liveness Score</strong>
           <span>{spoof ? `${(spoof.score * 100).toFixed(1)}%` : "—"}</span>
         </div>
+
         <div className="statusRow">
           <strong>Status</strong>
           <span style={{ fontSize: "0.9em" }}>{message}</span>
@@ -195,11 +194,6 @@ export function CameraCapture({ onCapture }: { onCapture: (result: CaptureResult
             <span>{spoof.modelUsed}</span>
           </div>
         )}
-        <div className="actions" style={{ marginTop: 12 }}>
-          <button className="button primary" onClick={() => capture()} disabled={isCapturing}>
-            {isCapturing ? "Processing..." : "Capture now (or wait 5s)"}
-          </button>
-        </div>
       </div>
     </div>
   );

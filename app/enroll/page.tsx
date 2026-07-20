@@ -8,21 +8,14 @@ import { saveLocalEmbedding } from "@/lib/localEmbeddingCache";
 
 export default function EnrollPage() {
   const [userId, setUserId] = useState("student-demo-001");
-  const [samples, setSamples] = useState<number[][]>([]);
-  const [status, setStatus] = useState("Capture 3 live samples");
+  const [status, setStatus] = useState("Hold face steady for 5 seconds to enroll");
 
   async function onCapture(result: CaptureResult) {
-    const next = [...samples, result.embedding];
-    setSamples(next);
-    if (next.length < 3) {
-      setStatus(`Sample ${next.length}/3 saved`);
-      return;
-    }
-    const mean = next[0].map((_, i) => next.reduce((sum, emb) => sum + emb[i], 0) / next.length);
-    await saveLocalEmbedding(userId, mean);
+    const embedding = result.embedding;
+    await saveLocalEmbedding(userId, embedding);
     try {
-      await saveEnrollment({ userId, embedding: mean, quality: result.quality });
-      setStatus("Enrollment saved to database and cached on device!");
+      await saveEnrollment({ userId, embedding, quality: result.quality });
+      setStatus("Enrollment complete! 1 verified face sample saved.");
     } catch {
       setStatus("Enrollment cached locally on this device!");
     }
@@ -30,12 +23,17 @@ export default function EnrollPage() {
 
   return (
     <main className="shell">
-      <nav className="nav"><Link className="brand" href="/">face-edu</Link><div className="navlinks"><Link href="/check-in/demo-session">Check in</Link></div></nav>
+      <nav className="nav">
+        <Link className="brand" href="/">face-edu</Link>
+        <div className="navlinks">
+          <Link href="/check-in/demo-session">Check in</Link>
+        </div>
+      </nav>
       <div className="panel" style={{ maxWidth: 960, margin: "0 auto 18px" }}>
         <h1 style={{ fontSize: 48 }}>Enroll face</h1>
-        <p>First enrollment saves the 512-d ArcFace embedding on the server, then caches it on this device for future check-ins.</p>
+        <p>Hold face steady for 5 seconds of anti-spoofing verification. 1 verified sample will be saved automatically.</p>
         <input value={userId} onChange={(event) => setUserId(event.target.value)} aria-label="User ID" />
-        <p><strong>{status}</strong></p>
+        <p style={{ marginTop: 10 }}><strong>{status}</strong></p>
       </div>
       <CameraCapture onCapture={onCapture} />
     </main>
