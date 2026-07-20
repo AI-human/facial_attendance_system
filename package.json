@@ -1,0 +1,30 @@
+{
+  "name": "faceroll-phase-v2",
+  "version": "2.0.0",
+  "private": true,
+  "description": "FaceRoll Phase V2: on-device face attendance with YuNet, ArcFace-MobileFaceNet, anti-spoofing, and Vercel-hosted database APIs.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vercel/postgres": "latest",
+    "lucide-react": "latest",
+    "next": "^16.2.10",
+    "onnxruntime-web": "^1.20.1",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.7",
+    "@types/react": "^19.0.7",
+    "@types/react-dom": "^19.0.3",
+    "eslint": "^9.18.0",
+    "eslint-config-next": "15.1.6",
+    "typescript": "^5.7.3"
+  }
+}
